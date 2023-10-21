@@ -1,6 +1,6 @@
-= Quarkus Camel LRU Cache issue
+= Quarkus Camel OOM issue
 
-This project demonstrates that the LRU cache used by an OGNL expression in the simple language does not use link:https://docs.oracle.com/en/java/javase/17/docs/api/java.base/java/lang/ref/SoftReference.html[soft references (`docs.oracle.com`)].
+This project demonstrates [.line-through]#that the LRU cache used by an OGNL expression in the simple language does not use link:https://docs.oracle.com/en/java/javase/17/docs/api/java.base/java/lang/ref/SoftReference.html[soft references (`docs.oracle.com`)]# a OOM problem with camel.
 
 We define a timer-triggered route that will set the body of the exchange to a large message. Then, we will access a field of that large object through OGNL:
 
@@ -10,16 +10,18 @@ We define a timer-triggered route that will set the body of the exchange to a la
 public class TimerRoute extends RouteBuilder {
   private final AtomicInteger calls = new AtomicInteger();
 
+  private final MemorySize objectSize;
+
+  ...
+
   @Override
   public void configure() {
+    ...
     // @formatter:off
-    from(
-        timer("timer")
-            .period(Duration.ofMillis(100).toMillis())
-            .fixedRate(true))
+    from(timer("timer").delay(-1))
         .process(exchange -> {
           log.info("calls: {}", calls.incrementAndGet());
-          exchange.getIn().setBody(new LargeObject());
+          exchange.getIn().setBody(new LargeObject(objectSize.asBigInteger().intValue()));
         })
         .log("${body.fieldTwo}");
     // @formatter:on
@@ -32,7 +34,6 @@ The large object is just a simple, immutable POJO:
 .Large Object
 [source,java]
 ----
-@Value
 public class LargeObject {
   private static final Random RANDOM = new Random();
 
@@ -40,14 +41,16 @@ public class LargeObject {
   String fieldOne;
   String fieldTwo;
 
-  public LargeObject() {
-    this.data = new byte[100 * 1024 * 1024]; // 100 MB
+  public LargeObject(int byteSize) {
+    this.data = new byte[byteSize];
     RANDOM.nextBytes(data);
     fieldOne = UUID.randomUUID().toString();
     fieldTwo = UUID.randomUUID().toString();
   }
 }
 ----
+
+The default value for `objectSize` is `100M`, i.e. `100 * 1024 * 1024 = 104857600` bytes. The size can be configured by setting environment variable `OBJECT_SIZE` to, e.g., `1M`.
 
 Notice that we do not hold a reference to the large object, we only print one of its fields through the OGNL expression in the simple expression.
 
@@ -59,12 +62,13 @@ Notice that we do not hold a reference to the large object, we only print one of
 ./mvnw clean package
 ----
 
-=== Running the program, observing the error
+=== Running the program with `100M` object size, observing the error
 For the test to end in a sensible amount of time, we need to limit the max heap of the VM. We will do so by setting JVM parameters `-XX:MinRAMPercentage` and `-XX:MaxRAMPercentage` to a sufficient low value. For my system (32 GB RAM), 10(%) has the desired effect. We also stop the program on the first `OutOfMemoryError` through `-XX:+ExitOnOutOfMemoryError`.
 
 .Starting the program
 [source,bash]
 ----
+export OBJECT_SIZE=100M
 java \
   -XX:MinRAMPercentage=10 \
   -XX:MaxRAMPercentage=10 \
@@ -90,6 +94,22 @@ The execution results in the following logs:
 Terminating due to java.lang.OutOfMemoryError: Java heap space
 ----
 
+=== Run the program with `1M` object size, observe no error
+For the test to end in a sensible amount of time, we need to limit the max heap of the VM. We will do so by setting JVM parameters `-XX:MinRAMPercentage` and `-XX:MaxRAMPercentage` to a sufficient low value. For my system (32 GB RAM), 10(%) has the desired effect. We also stop the program on the first `OutOfMemoryError` through `-XX:+ExitOnOutOfMemoryError`.
+
+.Starting the program
+[source,bash]
+----
+export OBJECT_SIZE=1M
+java \
+  -XX:MinRAMPercentage=10 \
+  -XX:MaxRAMPercentage=10 \
+  -XX:+ExitOnOutOfMemoryError \
+  -jar target/quarkus-app/quarkus-run.jar
+----
+
+Observe that the program keeps running, no `OutOfMemoryError` is thrown.
+
 == Native Mode
 === Building the program
 .Building the program
@@ -98,12 +118,13 @@ Terminating due to java.lang.OutOfMemoryError: Java heap space
 ./mvnw --define native clean package
 ----
 
-=== Running the program, observing the error
+=== Running the program with `100M` object size, observing the error
 For the test to end in a sensible amount of time, we need to limit the max heap of the VM. We will do so by setting JVM parameter `-XX:MaximumHeapSizePercent` to a sufficient low value. For my system (32 GB RAM), 10(%) has the desired effect. We also stop the program on the first `OutOfMemoryError` through `-XX:+ExitOnOutOfMemoryError`.
 
 .Starting the program
 [source,bash]
 ----
+export OBJECT_SIZE=100M
 target/quarkus-camel-lru-cache-1.0.0-SNAPSHOT-runner \
   -XX:MaximumHeapSizePercent=10 \
   -XX:+ExitOnOutOfMemoryError
@@ -115,14 +136,31 @@ The execution results in the following logs:
 [source]
 ----
 ...
-2023-10-20 19:17:18,692 INFO  [de.tur.TimerRoute] (Camel (camel-1) thread #1 - timer://timer) calls: 28
-2023-10-20 19:17:19,065 INFO  [route1] (Camel (camel-1) thread #1 - timer://timer) 8140a35f-5519-4920-8e02-47c6797e675e
-2023-10-20 19:17:19,065 INFO  [de.tur.TimerRoute] (Camel (camel-1) thread #1 - timer://timer) calls: 29
-2023-10-20 19:17:19,495 INFO  [route1] (Camel (camel-1) thread #1 - timer://timer) e3d341c0-66fa-4ea7-b381-7b559fa61ecb
-2023-10-20 19:17:19,495 INFO  [de.tur.TimerRoute] (Camel (camel-1) thread #1 - timer://timer) calls: 30
-2023-10-20 19:17:19,873 INFO  [route1] (Camel (camel-1) thread #1 - timer://timer) 047516c7-d0cb-403f-afac-3f4f5ba1ab4f
-2023-10-20 19:17:19,873 INFO  [de.tur.TimerRoute] (Camel (camel-1) thread #1 - timer://timer) calls: 31
-2023-10-20 19:17:20,308 INFO  [route1] (Camel (camel-1) thread #1 - timer://timer) e8e61885-a0e7-420f-8c29-d3892b183f90
-2023-10-20 19:17:20,308 INFO  [de.tur.TimerRoute] (Camel (camel-1) thread #1 - timer://timer) calls: 32
+2023-10-21 14:07:50,260 INFO  [de.tur.TimerRoute] (Camel (camel-1) thread #1 - timer://timer) calls: 28
+2023-10-21 14:07:50,623 INFO  [route1] (Camel (camel-1) thread #1 - timer://timer) e868c474-801d-42dc-92c7-28af5c4d8c39
+2023-10-21 14:07:50,623 INFO  [de.tur.TimerRoute] (Camel (camel-1) thread #1 - timer://timer) calls: 29
+2023-10-21 14:07:50,982 INFO  [route1] (Camel (camel-1) thread #1 - timer://timer) 4af046de-6da4-4b65-82ae-764004ec0c47
+2023-10-21 14:07:50,982 INFO  [de.tur.TimerRoute] (Camel (camel-1) thread #1 - timer://timer) calls: 30
+2023-10-21 14:07:51,366 INFO  [route1] (Camel (camel-1) thread #1 - timer://timer) 8e680efe-c6fd-4d55-8cc3-828c18a28fe3
+2023-10-21 14:07:51,366 INFO  [de.tur.TimerRoute] (Camel (camel-1) thread #1 - timer://timer) calls: 31
+2023-10-21 14:07:51,729 INFO  [route1] (Camel (camel-1) thread #1 - timer://timer) e80fc719-b0ac-42f4-b9ca-b86c18d78f37
+2023-10-21 14:07:51,729 INFO  [de.tur.TimerRoute] (Camel (camel-1) thread #1 - timer://timer) calls: 32
 Terminating due to java.lang.OutOfMemoryError: Garbage-collected heap size exceeded.
 ----
+
+=== Run the program with `1M` object size, observe no error
+For the test to end in a sensible amount of time, we need to limit the max heap of the VM. We will do so by setting JVM parameter `-XX:MaximumHeapSizePercent` to a sufficient low value. For my system (32 GB RAM), 10(%) has the desired effect. We also stop the program on the first `OutOfMemoryError` through `-XX:+ExitOnOutOfMemoryError`.
+
+.Starting the program
+[source,bash]
+----
+export OBJECT_SIZE=1M
+target/quarkus-camel-lru-cache-1.0.0-SNAPSHOT-runner \
+  -XX:MaximumHeapSizePercent=10 \
+  -XX:+ExitOnOutOfMemoryError
+----
+
+Observe that the program keeps running, no `OutOfMemoryError` is thrown.
+
+== Further investigation
+In the `1M`-case in JVM mode, if I lower the memory percentage to only 5% instead of 10%, I will, again, get the `OutOfMemoryError`, at around the 800th execution of the route. For the JVM-mode, I had to lower it to 3% to get the error to appear again. It then appears around the `970`th execution of the route.

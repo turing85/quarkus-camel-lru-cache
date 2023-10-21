@@ -15,8 +15,8 @@ public class LargeObject {
   String fieldOne;
   String fieldTwo;
 
-  public LargeObject() {
-    this.data = new byte[100 * 1024 * 1024]; // 100 MB
+  public LargeObject(int byteSize) {
+    this.data = new byte[byteSize];
     RANDOM.nextBytes(data);
     fieldOne = UUID.randomUUID().toString();
     fieldTwo = UUID.randomUUID().toString();
